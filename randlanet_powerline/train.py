@@ -65,10 +65,36 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
 
     max_pts = args.max_points_per_file if args.max_points_per_file > 0 else None
-    points, labels = load_points_and_labels(args.dataset_dir, max_points_per_file=max_pts)
-    points, center, scale = normalize_points(points)
-
-    x_train, y_train, x_val, y_val = train_val_split(points, labels, val_ratio=args.val_ratio, seed=args.seed)
+    
+    # Load training data
+    print("Loading training data from train_randla_net.las...")
+    try:
+        x_train, y_train = load_points_and_labels(args.dataset_dir, 
+                                                 file_names=["train_randla_net.las"], 
+                                                 max_points_per_file=max_pts)
+        print(f"Training data: {x_train.shape[0]} points")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"train_randla_net.las not found in {args.dataset_dir}")
+    
+    # Normalize training data
+    x_train, center, scale = normalize_points(x_train)
+    
+    # Load validation data if available
+    val_data_path = os.path.join(args.dataset_dir, "val_randla_net.las")
+    if os.path.exists(val_data_path):
+        print("Loading validation data from val_randla_net.las...")
+        x_val, y_val = load_points_and_labels(args.dataset_dir, 
+                                             file_names=["val_randla_net.las"], 
+                                             max_points_per_file=max_pts)
+        # Apply same normalization as training data
+        x_val = (x_val - center) / max(scale, 1e-8)
+        print(f"Validation data: {x_val.shape[0]} points")
+    else:
+        print("No validation data found, using portion of training data for validation...")
+        # Fallback to splitting training data
+        x_train, y_train, x_val, y_val = train_val_split(x_train, y_train, 
+                                                        val_ratio=args.val_ratio, 
+                                                        seed=args.seed)
 
     train_ds = RandomPointBlockDataset(
         x_train,
@@ -89,9 +115,9 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RandLANet(num_classes=2).to(device)
+    model = RandLANet(num_classes=3).to(device)
 
-    class_weights = compute_class_weights(y_train)
+    class_weights = compute_class_weights(y_train, num_classes=3)
     class_weights_t = torch.tensor(class_weights, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=class_weights_t)
 

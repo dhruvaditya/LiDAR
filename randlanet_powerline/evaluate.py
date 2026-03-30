@@ -25,19 +25,34 @@ def main():
     args = parser.parse_args()
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
-    model = RandLANet(num_classes=2)
+    center = ckpt.get("center", np.zeros(3, dtype=np.float32))
+    scale = float(ckpt.get("scale", 1.0))
+    
+    model = RandLANet(num_classes=3)
     model.load_state_dict(ckpt["model_state_dict"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
 
-    points, labels = load_points_and_labels(args.dataset_dir)
-    points, _, _ = normalize_points(points)
-    _, _, x_val, y_val = train_val_split(points, labels, val_ratio=args.val_ratio, seed=args.seed)
+    # Load validation data
+    val_data_path = os.path.join(args.dataset_dir, "val_randla_net.las")
+    if os.path.exists(val_data_path):
+        print("Loading validation data from val_randla_net.las...")
+        points, labels = load_points_and_labels(args.dataset_dir, 
+                                               file_names=["val_randla_net.las"])
+        # Apply normalization from training
+        points = (points - center) / max(scale, 1e-8)
+    else:
+        print("val_randla_net.las not found, loading all data and using validation split...")
+        points, labels = load_points_and_labels(args.dataset_dir)
+        points, center, scale = normalize_points(points)
+        _, _, points, labels = train_val_split(points, labels, 
+                                              val_ratio=args.val_ratio, 
+                                              seed=args.seed)
 
     val_ds = RandomPointBlockDataset(
-        x_val,
-        y_val,
+        points,
+        labels,
         num_points=args.num_points,
         steps_per_epoch=args.val_steps,
         augment=False,

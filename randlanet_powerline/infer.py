@@ -25,7 +25,7 @@ def main():
     center = ckpt.get("center", np.zeros(3, dtype=np.float32))
     scale = float(ckpt.get("scale", 1.0))
 
-    model = RandLANet(num_classes=2)
+    model = RandLANet(num_classes=3)
     model.load_state_dict(ckpt["model_state_dict"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

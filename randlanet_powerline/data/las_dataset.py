@@ -8,7 +8,8 @@ import torch
 from torch.utils.data import Dataset
 
 
-DEFAULT_POSITIVE_PATTERNS = ["electrical_pole", "line"]
+POWERLINE_PATTERNS = ["line", "power"]
+PYLON_PATTERNS = ["pylon", "pole", "electrical_pole", "tower"]
 
 
 def discover_las_files(dataset_dir: str) -> List[str]:
@@ -19,41 +20,79 @@ def discover_las_files(dataset_dir: str) -> List[str]:
     return files
 
 
-def is_positive_file(path: str, positive_patterns: Sequence[str]) -> bool:
+def get_file_class(path: str, powerline_patterns: Sequence[str] = None, pylon_patterns: Sequence[str] = None) -> int:
+    """Classify LAS file into class 0 (background), 1 (power line), or 2 (pylon)."""
+    powerline_patterns = powerline_patterns or POWERLINE_PATTERNS
+    pylon_patterns = pylon_patterns or PYLON_PATTERNS
+    
     name = os.path.basename(path).lower()
-    return any(pattern.lower() in name for pattern in positive_patterns)
+    
+    # Check for pylon/pole first (class 2)
+    if any(pattern.lower() in name for pattern in pylon_patterns):
+        return 2
+    # Then check for power line (class 1)
+    elif any(pattern.lower() in name for pattern in powerline_patterns):
+        return 1
+    # Otherwise background (class 0)
+    else:
+        return 0
 
 
-def _read_xyz(path: str) -> np.ndarray:
+def _read_xyz_and_labels(path: str) -> Tuple[np.ndarray, np.ndarray]:
     las = laspy.read(path)
     xyz = np.vstack((las.x, las.y, las.z)).T.astype(np.float32)
+    labels = np.array(las.classification).astype(np.int64)
     if xyz.shape[0] == 0:
         raise ValueError(f"No points found in LAS file: {path}")
-    return xyz
+    return xyz, labels
 
 
 def load_points_and_labels(
     dataset_dir: str,
-    positive_patterns: Optional[Sequence[str]] = None,
+    file_names: Optional[List[str]] = None,
     max_points_per_file: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    patterns = positive_patterns or DEFAULT_POSITIVE_PATTERNS
+    """
+    Load points and labels from LAS files.
+    
+    Args:
+        dataset_dir: Directory containing LAS files
+        file_names: List of specific file names to load (e.g., ['train_randla_net.las'])
+                   If None, loads all .las files
+        max_points_per_file: Maximum points to load per file (random sampling if exceeded)
+    
+    Returns:
+        points: Combined point cloud (N, 3)
+        labels: Combined labels (N,)
+    """
+    if file_names is None:
+        # Load all LAS files
+        files = discover_las_files(dataset_dir)
+    else:
+        # Load specific files
+        files = [os.path.join(dataset_dir, fname) for fname in file_names]
+        # Check that files exist
+        for f in files:
+            if not os.path.exists(f):
+                raise FileNotFoundError(f"LAS file not found: {f}")
+    
     point_chunks = []
     label_chunks = []
-
-    for path in discover_las_files(dataset_dir):
-        xyz = _read_xyz(path)
-
+    
+    for path in files:
+        xyz, labels = _read_xyz_and_labels(path)
+        
         if max_points_per_file is not None and xyz.shape[0] > max_points_per_file:
             idx = np.random.choice(xyz.shape[0], max_points_per_file, replace=False)
             xyz = xyz[idx]
-
-        label = 1 if is_positive_file(path, patterns) else 0
-        labels = np.full((xyz.shape[0],), label, dtype=np.int64)
-
+            labels = labels[idx]
+        
         point_chunks.append(xyz)
         label_chunks.append(labels)
-
+    
+    if not point_chunks:
+        raise ValueError(f"No data loaded from {dataset_dir}")
+    
     points = np.concatenate(point_chunks, axis=0)
     labels = np.concatenate(label_chunks, axis=0)
     return points, labels
@@ -136,8 +175,9 @@ class RandomPointBlockDataset(Dataset):
         return xyz.astype(np.float32)
 
 
-def compute_class_weights(labels: np.ndarray, epsilon: float = 1e-6) -> np.ndarray:
-    counts = np.bincount(labels, minlength=2).astype(np.float32)
+def compute_class_weights(labels: np.ndarray, num_classes: int = 3, epsilon: float = 1e-6) -> np.ndarray:
+    """Compute class weights for imbalanced dataset (3 classes by default)."""
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
     inv = 1.0 / (counts + epsilon)
-    weights = inv / inv.sum() * 2.0
+    weights = inv / inv.sum() * num_classes
     return weights.astype(np.float32)

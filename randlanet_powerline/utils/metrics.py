@@ -6,10 +6,11 @@ def confusion_binary(pred: torch.Tensor, target: torch.Tensor):
     pred = pred.detach().cpu().numpy().astype(np.int64).reshape(-1)
     target = target.detach().cpu().numpy().astype(np.int64).reshape(-1)
 
+    # For multi-class, compute per-class metrics
     tp = int(((pred == 1) & (target == 1)).sum())
-    tn = int(((pred == 0) & (target == 0)).sum())
-    fp = int(((pred == 1) & (target == 0)).sum())
-    fn = int(((pred == 0) & (target == 1)).sum())
+    tn = int(((pred != 1) & (target != 1)).sum())  # True negatives (not class 1)
+    fp = int(((pred == 1) & (target != 1)).sum())
+    fn = int(((pred != 1) & (target == 1)).sum())
     return tp, tn, fp, fn
 
 
