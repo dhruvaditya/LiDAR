@@ -126,6 +126,7 @@ def train_val_split(
 
 
 class RandomPointBlockDataset(Dataset):
+    """Random sampling dataset - samples random points from the point cloud."""
     def __init__(
         self,
         points: np.ndarray,
@@ -153,6 +154,89 @@ class RandomPointBlockDataset(Dataset):
 
         xyz = self.points[sample_idx].copy()
         y = self.labels[sample_idx].copy()
+
+        if self.augment:
+            xyz = self._augment_xyz(xyz)
+
+        return torch.from_numpy(xyz), torch.from_numpy(y)
+
+    @staticmethod
+    def _augment_xyz(xyz: np.ndarray) -> np.ndarray:
+        theta = np.random.uniform(0, 2 * np.pi)
+        c, s = np.cos(theta), np.sin(theta)
+        rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+        xyz = xyz @ rot.T
+
+        jitter = np.random.normal(0, 0.005, size=xyz.shape).astype(np.float32)
+        xyz = xyz + jitter
+
+        scale = np.random.uniform(0.95, 1.05)
+        xyz = xyz * scale
+
+        return xyz.astype(np.float32)
+
+
+class SpatiallyRegularDataset(Dataset):
+    def __init__(
+        self,
+        points: np.ndarray,
+        labels: np.ndarray,
+        num_points: int,
+        steps_per_epoch: int,
+        augment: bool = False,
+        noise_init: float = 3.5,
+    ) -> None:
+        if points.shape[0] != labels.shape[0]:
+            raise ValueError("points and labels must have same length")
+        self.points = points.astype(np.float32)
+        self.labels = labels.astype(np.int64)
+        self.num_points = int(num_points)
+        self.steps_per_epoch = int(steps_per_epoch)
+        self.augment = augment
+        self.noise_init = noise_init
+
+        # Initialize possibility scores (lower = more likely to be sampled)
+        self.possibility = np.random.rand(self.points.shape[0]) * 1e-3
+        self.min_possibility = float(np.min(self.possibility))
+
+    def __len__(self) -> int:
+        return self.steps_per_epoch
+
+    def __getitem__(self, index: int):
+        _ = index
+
+        # Choose point with minimum possibility (least sampled)
+        point_ind = np.argmin(self.possibility)
+
+        # Center point of input region
+        center_point = self.points[point_ind:point_ind+1]
+
+        # Add noise to center point
+        noise = np.random.normal(scale=self.noise_init / 10, size=center_point.shape)
+        pick_point = center_point + noise.astype(center_point.dtype)
+
+        # Query nearest neighbors
+        if len(self.points) < self.num_points:
+            # If we have fewer points than needed, take all
+            queried_idx = np.arange(len(self.points))
+        else:
+            # Compute distances to pick_point
+            dists = np.sum(np.square(self.points - pick_point), axis=1)
+            # Get indices of closest points
+            queried_idx = np.argsort(dists)[:self.num_points]
+
+        # Shuffle indices
+        np.random.shuffle(queried_idx)
+
+        # Get points and labels
+        xyz = self.points[queried_idx].copy() - pick_point
+        y = self.labels[queried_idx].copy()
+
+        # Update possibility scores
+        dists = np.sum(np.square((self.points[queried_idx] - pick_point).astype(np.float32)), axis=1)
+        delta = np.square(1 - dists / np.max(dists + 1e-6))
+        self.possibility[queried_idx] += delta
+        self.min_possibility = float(np.min(self.possibility))
 
         if self.augment:
             xyz = self._augment_xyz(xyz)
