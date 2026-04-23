@@ -162,16 +162,29 @@ class RandomPointBlockDataset(Dataset):
 
     @staticmethod
     def _augment_xyz(xyz: np.ndarray) -> np.ndarray:
+        # Rotation (preserves linear structures)
         theta = np.random.uniform(0, 2 * np.pi)
         c, s = np.cos(theta), np.sin(theta)
         rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
         xyz = xyz @ rot.T
 
-        jitter = np.random.normal(0, 0.005, size=xyz.shape).astype(np.float32)
+        # Small jitter (realistic noise)
+        jitter = np.random.normal(0, 0.002, size=xyz.shape).astype(np.float32)
         xyz = xyz + jitter
 
-        scale = np.random.uniform(0.95, 1.05)
+        # Scale variation (power lines can appear at different distances)
+        scale = np.random.uniform(0.9, 1.1)
         xyz = xyz * scale
+
+        # Elastic deformation (simulates wind/sag effects on power lines)
+        if np.random.rand() < 0.3:  # 30% chance
+            # Apply small elastic deformation along the longest axis
+            ranges = np.ptp(xyz, axis=0)  # peak-to-peak range
+            longest_axis = np.argmax(ranges)
+
+            # Create displacement field
+            displacement = np.random.normal(0, 0.01, size=xyz.shape[0])
+            xyz[:, longest_axis] += displacement
 
         return xyz.astype(np.float32)
 
@@ -245,16 +258,29 @@ class SpatiallyRegularDataset(Dataset):
 
     @staticmethod
     def _augment_xyz(xyz: np.ndarray) -> np.ndarray:
+        # Rotation (preserves linear structures)
         theta = np.random.uniform(0, 2 * np.pi)
         c, s = np.cos(theta), np.sin(theta)
         rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
         xyz = xyz @ rot.T
 
-        jitter = np.random.normal(0, 0.005, size=xyz.shape).astype(np.float32)
+        # Small jitter (realistic noise)
+        jitter = np.random.normal(0, 0.002, size=xyz.shape).astype(np.float32)
         xyz = xyz + jitter
 
-        scale = np.random.uniform(0.95, 1.05)
+        # Scale variation (power lines can appear at different distances)
+        scale = np.random.uniform(0.9, 1.1)
         xyz = xyz * scale
+
+        # Elastic deformation (simulates wind/sag effects on power lines)
+        if np.random.rand() < 0.3:  # 30% chance
+            # Apply small elastic deformation along the longest axis
+            ranges = np.ptp(xyz, axis=0)  # peak-to-peak range
+            longest_axis = np.argmax(ranges)
+
+            # Create displacement field
+            displacement = np.random.normal(0, 0.01, size=xyz.shape[0])
+            xyz[:, longest_axis] += displacement
 
         return xyz.astype(np.float32)
 

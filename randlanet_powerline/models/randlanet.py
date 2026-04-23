@@ -1,4 +1,4 @@
-﻿from typing import Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,12 @@ def knn_indices(xyz: torch.Tensor, k: int) -> torch.Tensor:
 
 
 class LocalFeatureAggregation(nn.Module):
+    """LFA with attentive pooling instead of max-pooling.
+
+    Attention pooling lets the network learn *which* neighbours matter most,
+    which is especially beneficial for thin, sparse structures (power lines).
+    """
+
     def __init__(self, in_channels: int, out_channels: int, k: int = 16) -> None:
         super().__init__()
         self.k = k
@@ -40,6 +46,9 @@ class LocalFeatureAggregation(nn.Module):
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(0.2, inplace=True),
         )
+
+        # Attentive pooling: learn a scalar weight per neighbour
+        self.att_score = nn.Conv2d(out_channels, 1, kernel_size=1, bias=True)
 
         self.shortcut = nn.Sequential(
             nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False),
@@ -63,7 +72,11 @@ class LocalFeatureAggregation(nn.Module):
         dist = torch.norm(rel_xyz, dim=1, keepdim=True)
 
         edge_feat = torch.cat([center_f, neighbor_f - center_f, rel_xyz, dist], dim=1)
-        out = self.edge_mlp(edge_feat).max(dim=-1).values
+        edge_out = self.edge_mlp(edge_feat)          # [B, C_out, N, k]
+
+        # Attentive pooling: softmax over k neighbours, then weighted sum
+        att = torch.softmax(self.att_score(edge_out), dim=-1)  # [B, 1, N, k]
+        out = (edge_out * att).sum(dim=-1)           # [B, C_out, N]
 
         shortcut = self.shortcut(features)
         return F.leaky_relu(out + shortcut, negative_slope=0.2, inplace=True)
@@ -95,23 +108,34 @@ def nearest_interpolate(target_xyz: torch.Tensor, source_xyz: torch.Tensor, sour
 
 
 class RandLANet(nn.Module):
-    def __init__(self, num_classes: int = 2, k: int = 16) -> None:
+    def __init__(self, num_classes: int = 2, k: int = 16, d_model: list = None) -> None:
         super().__init__()
-        self.enc1 = LocalFeatureAggregation(3, 32, k=k)
-        self.enc2 = LocalFeatureAggregation(32, 64, k=k)
-        self.enc3 = LocalFeatureAggregation(64, 128, k=k)
+        if d_model is None:
+            d_model = [32, 64, 128, 256]  # Match checkpoint dimensions
+        # Encoder
+        self.enc1 = LocalFeatureAggregation(3, d_model[0], k=k)
+        self.enc2 = LocalFeatureAggregation(d_model[0], d_model[1], k=k)
+        self.enc3 = LocalFeatureAggregation(d_model[1], d_model[2], k=k)
+        self.enc4 = LocalFeatureAggregation(d_model[2], d_model[3], k=k)
 
+        # Decoder
+        self.dec3 = nn.Sequential(
+            nn.Conv1d(d_model[3] + d_model[2], 128, kernel_size=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
         self.dec2 = nn.Sequential(
-            nn.Conv1d(128 + 64, 96, kernel_size=1, bias=False),
+            nn.Conv1d(128 + d_model[1], 96, kernel_size=1, bias=False),
             nn.BatchNorm1d(96),
             nn.LeakyReLU(0.2, inplace=True),
         )
         self.dec1 = nn.Sequential(
-            nn.Conv1d(96 + 32, 64, kernel_size=1, bias=False),
+            nn.Conv1d(96 + d_model[0], 64, kernel_size=1, bias=False),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
+        # Classification head — two-stage MLP with dropout at both stages
         self.head = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=1, bias=False),
             nn.BatchNorm1d(64),
@@ -132,7 +156,13 @@ class RandLANet(nn.Module):
         xyz3, f3_in = random_subsample(xyz2, f2, ratio=0.25)
         f3 = self.enc3(xyz3, f3_in)
 
-        up2 = nearest_interpolate(xyz2, xyz3, f3)
+        xyz4, f4_in = random_subsample(xyz3, f3, ratio=0.25)
+        f4 = self.enc4(xyz4, f4_in)
+
+        up3 = nearest_interpolate(xyz3, xyz4, f4)
+        d3 = self.dec3(torch.cat([up3, f3], dim=1))
+
+        up2 = nearest_interpolate(xyz2, xyz3, d3)
         d2 = self.dec2(torch.cat([up2, f2], dim=1))
 
         up1 = nearest_interpolate(xyz, xyz2, d2)

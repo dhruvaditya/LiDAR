@@ -93,10 +93,9 @@ def resolve_checkpoint(checkpoint: str) -> str:
         os.path.join(script_root, "check_test", "best.pt"),
         os.path.join(script_root, "check_test", "last.pt"),
     ]
-    
+
     for candidate in candidates:
         if os.path.exists(candidate):
-            print(f"Found checkpoint: {candidate}")
             return candidate
 
     raise FileNotFoundError(
@@ -135,18 +134,37 @@ def multiclass_metrics(cm: torch.Tensor) -> dict:
     }
 
 
-def plot_confusion_matrix(cm: torch.Tensor, num_classes: int, output_path: str = None):
+def run_inference(model, test_loader, device, xyz):
+    """Run inference and return predictions"""
+    preds = np.zeros((xyz.shape[0],), dtype=np.int64)
+
+    with torch.no_grad():
+        for batch_xyz, batch_starts, batch_ends in test_loader:
+            batch_xyz = batch_xyz.to(device)
+            batch_logits = model(batch_xyz)
+            batch_preds = torch.argmax(batch_logits, dim=1).cpu().numpy()
+
+            for i in range(len(batch_starts)):
+                start = batch_starts[i].item()
+                end = batch_ends[i].item()
+                chunk_pred = batch_preds[i][:end - start]
+                preds[start:end] = chunk_pred
+
+    return preds
+
+
+def plot_confusion_matrix(cm: torch.Tensor, num_classes: int, title: str, output_path: str = None):
     """Plot confusion matrix as a heatmap."""
     cm_np = cm.numpy() if isinstance(cm, torch.Tensor) else cm
-    
+
     fig, ax = plt.subplots(figsize=(10, 8))
     sns.heatmap(cm_np, annot=True, fmt='d', cmap='Blues', cbar=True, ax=ax)
     ax.set_xlabel('Predicted Label', fontsize=12)
     ax.set_ylabel('True Label', fontsize=12)
-    ax.set_title('Confusion Matrix', fontsize=14, fontweight='bold')
+    ax.set_title(f'Confusion Matrix - {title}', fontsize=14, fontweight='bold')
     ax.set_xticklabels([f'Class {i}' for i in range(num_classes)])
     ax.set_yticklabels([f'Class {i}' for i in range(num_classes)])
-    
+
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -154,14 +172,14 @@ def plot_confusion_matrix(cm: torch.Tensor, num_classes: int, output_path: str =
     plt.show()
 
 
-def plot_per_class_metrics(metrics: dict, num_classes: int, output_path: str = None):
+def plot_per_class_metrics(metrics: dict, num_classes: int, title: str, output_path: str = None):
     """Plot per-class metrics (IoU, F1, Precision, Recall)."""
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Per-Class Performance Metrics', fontsize=16, fontweight='bold')
-    
+    fig.suptitle(f'Per-Class Performance Metrics - {title}', fontsize=16, fontweight='bold')
+
     class_labels = [f'Class {i}' for i in range(num_classes)]
     x_pos = np.arange(num_classes)
-    
+
     # IoU per class
     ax = axes[0, 0]
     iou_values = metrics['iou_per_class']
@@ -176,7 +194,7 @@ def plot_per_class_metrics(metrics: dict, num_classes: int, output_path: str = N
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f'{val:.3f}', ha='center', va='bottom', fontsize=9)
-    
+
     # F1 per class
     ax = axes[0, 1]
     f1_values = metrics['f1_per_class']
@@ -191,7 +209,7 @@ def plot_per_class_metrics(metrics: dict, num_classes: int, output_path: str = N
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f'{val:.3f}', ha='center', va='bottom', fontsize=9)
-    
+
     # Precision per class
     ax = axes[1, 0]
     precision_values = metrics['precision_per_class']
@@ -206,7 +224,7 @@ def plot_per_class_metrics(metrics: dict, num_classes: int, output_path: str = N
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f'{val:.3f}', ha='center', va='bottom', fontsize=9)
-    
+
     # Recall per class
     ax = axes[1, 1]
     recall_values = metrics['recall_per_class']
@@ -221,7 +239,7 @@ def plot_per_class_metrics(metrics: dict, num_classes: int, output_path: str = N
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height,
                 f'{val:.3f}', ha='center', va='bottom', fontsize=9)
-    
+
     plt.tight_layout()
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -230,173 +248,220 @@ def plot_per_class_metrics(metrics: dict, num_classes: int, output_path: str = N
     plt.show()
 
 
-def plot_error_analysis(metrics: dict, num_classes: int, output_path: str = None):
-    """Plot error analysis (TP, FP, FN)."""
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    x = np.arange(num_classes)
-    width = 0.25
-    
-    tp_values = metrics['tp']
-    fp_values = metrics['fp']
-    fn_values = metrics['fn']
-    
-    bars1 = ax.bar(x - width, tp_values, width, label='True Positives', color='green', alpha=0.8)
-    bars2 = ax.bar(x, fp_values, width, label='False Positives', color='red', alpha=0.8)
-    bars3 = ax.bar(x + width, fn_values, width, label='False Negatives', color='orange', alpha=0.8)
-    
-    ax.set_xlabel('Class', fontsize=12)
-    ax.set_ylabel('Count', fontsize=12)
-    ax.set_title('Error Analysis: TP, FP, FN per Class', fontsize=14, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels([f'Class {i}' for i in range(num_classes)])
-    ax.legend(fontsize=11)
-    ax.grid(axis='y', alpha=0.3)
-    
+def plot_model_comparison(metrics_best: dict, metrics_last: dict, num_classes: int, output_path: str = None):
+    """Plot comparison between best and last model metrics."""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Model Comparison: Best vs Last Checkpoint', fontsize=16, fontweight='bold')
+
+    class_labels = [f'Class {i}' for i in range(num_classes)]
+    x_pos = np.arange(num_classes)
+    width = 0.35
+
+    metrics = [
+        ('iou_per_class', 'IoU', 'skyblue', 'lightblue'),
+        ('f1_per_class', 'F1 Score', 'lightgreen', 'palegreen'),
+        ('precision_per_class', 'Precision', 'salmon', 'lightsalmon'),
+        ('recall_per_class', 'Recall', 'plum', 'thistle')
+    ]
+
+    for idx, (metric_key, title, color1, color2) in enumerate(metrics):
+        ax = axes[idx // 2, idx % 2]
+
+        best_values = metrics_best[metric_key]
+        last_values = metrics_last[metric_key]
+
+        bars1 = ax.bar(x_pos - width/2, best_values, width, label='Best Model', color=color1, edgecolor='navy')
+        bars2 = ax.bar(x_pos + width/2, last_values, width, label='Last Model', color=color2, edgecolor='darkred')
+
+        ax.set_ylabel(title, fontsize=11)
+        ax.set_title(f'{title} Comparison', fontsize=12, fontweight='bold')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(class_labels)
+        ax.set_ylim([0, 1])
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+
+        # Add value labels
+        for bar, val in zip(bars1, best_values):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+
+        for bar, val in zip(bars2, last_values):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+
     plt.tight_layout()
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"Error analysis plot saved to: {output_path}")
+        print(f"Model comparison plot saved to: {output_path}")
     plt.show()
 
 
-def save_predictions(las, preds, output_path: str, class_filter: int = None):
-    if class_filter is not None:
-        mask = preds == class_filter
-        if not mask.any():
-            print(f"No points found for class {class_filter}. Skipping save.")
-            return
-        # Filter the LAS data
-        filtered_las = laspy.LasData(las.header)
-        filtered_las.x = las.x[mask]
-        filtered_las.y = las.y[mask]
-        filtered_las.z = las.z[mask]
-        for dim_name in las.point_format.dimension_names:
-            if dim_name in {"X", "Y", "Z"}:
-                continue
-            filtered_las[dim_name] = las[dim_name][mask]
-        filtered_las.classification = preds[mask].astype(np.uint8)
-        out_las = filtered_las
-    else:
-        out_las = laspy.LasData(las.header)
-        out_las.x = las.x
-        out_las.y = las.y
-        out_las.z = las.z
-        for dim_name in las.point_format.dimension_names:
-            if dim_name in {"X", "Y", "Z"}:
-                continue
-            out_las[dim_name] = las[dim_name]
-        out_las.classification = preds.astype(np.uint8)
+def plot_overall_metrics_comparison(metrics_best: dict, metrics_last: dict, output_path: str = None):
+    """Plot overall metrics comparison between models."""
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    out_las.write(output_path)
+    metrics_names = ['Accuracy', 'Mean IoU', 'Mean F1']
+    best_values = [metrics_best['accuracy'], metrics_best['iou'], metrics_best['mean_f1']]
+    last_values = [metrics_last['accuracy'], metrics_last['iou'], metrics_last['mean_f1']]
+
+    x_pos = np.arange(len(metrics_names))
+    width = 0.35
+
+    bars1 = ax.bar(x_pos - width/2, best_values, width, label='Best Model', color='steelblue', edgecolor='navy')
+    bars2 = ax.bar(x_pos + width/2, last_values, width, label='Last Model', color='lightcoral', edgecolor='darkred')
+
+    ax.set_ylabel('Score', fontsize=12)
+    ax.set_title('Overall Metrics Comparison: Best vs Last Model', fontsize=14, fontweight='bold')
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(metrics_names)
+    ax.set_ylim([0, 1])
+    ax.legend()
+    ax.grid(axis='y', alpha=0.3)
+
+    # Add value labels
+    for bar, val in zip(bars1, best_values):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.4f}', ha='center', va='bottom', fontsize=10)
+
+    for bar, val in zip(bars2, last_values):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.4f}', ha='center', va='bottom', fontsize=10)
+
+    plt.tight_layout()
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Overall metrics comparison saved to: {output_path}")
+    plt.show()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test the last trained RandLA-Net model on test_randla_net.las")
+    parser = argparse.ArgumentParser(description="Compare best.pt and last.pt models with comprehensive statistical plots")
     parser.add_argument("--dataset_dir", type=str, default="data", help="Root data folder or data/data_split")
-    parser.add_argument("--checkpoint", type=str, default="", help="Path to checkpoint file")
-    parser.add_argument("--output_las", type=str, default="data/data_split/test_randla_net_predicted.las")
     parser.add_argument("--chunk_size", type=int, default=4096)
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for inference")
-    parser.add_argument("--save_powerlines_only", action="store_true", help="Save only power line points (class 1) in the output LAS")
     args = parser.parse_args()
 
     args.dataset_dir = resolve_dataset_dir(args.dataset_dir)
-    ckpt_path = resolve_checkpoint(args.checkpoint)
     print(f"Using dataset_dir: {args.dataset_dir}")
-    print(f"Using checkpoint: {ckpt_path}")
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    center = ckpt.get("center", np.zeros(3, dtype=np.float32))
-    scale = float(ckpt.get("scale", 1.0))
-    num_classes = int(ckpt.get("num_classes", 3))
-
-    model = RandLANet(num_classes=num_classes)
-    try:
-        missing_keys, unexpected_keys = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-        if missing_keys or unexpected_keys:
-            print("Warning: Model state_dict loading with mismatches:")
-            if missing_keys:
-                print(f"  Missing keys: {missing_keys}")
-            if unexpected_keys:
-                print(f"  Unexpected keys: {unexpected_keys}")
-            print("Proceeding with partial loading. Results may be inaccurate.")
-    except RuntimeError as e:
-        print(f"Warning: Failed to load state_dict due to size mismatches: {e}")
-        print("Attempting to load matching parameters manually...")
-        # Try to load only the matching keys
-        state_dict = ckpt["model_state_dict"]
-        model_dict = model.state_dict()
-        loaded_keys = []
-        for k in model_dict:
-            if k in state_dict and state_dict[k].shape == model_dict[k].shape:
-                model_dict[k] = state_dict[k]
-                loaded_keys.append(k)
-        model.load_state_dict(model_dict)
-        print(f"Loaded {len(loaded_keys)} matching parameters. Results may be inaccurate.")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-
+    # Load test data
     test_file = os.path.join(args.dataset_dir, "test_randla_net.las")
     if not os.path.exists(test_file):
-        raise FileNotFoundError(
-            f"Test file not found. Expected: {test_file}"
-        )
+        raise FileNotFoundError(f"Test file not found: {test_file}")
 
     las = laspy.read(test_file)
     xyz = np.vstack((las.x, las.y, las.z)).T.astype(np.float32)
     labels = np.array(las.classification).astype(np.int64)
 
+    # Find checkpoints
+    best_checkpoint = resolve_checkpoint("randlanet_powerline/checkpoints/best.pt")
+    last_checkpoint = resolve_checkpoint("randlanet_powerline/checkpoints/last.pt")
+
+    print(f"Best checkpoint: {best_checkpoint}")
+    print(f"Last checkpoint: {last_checkpoint}")
+
+    # Load checkpoints
+    ckpt_best = torch.load(best_checkpoint, map_location="cpu", weights_only=False)
+    ckpt_last = torch.load(last_checkpoint, map_location="cpu", weights_only=False)
+
+    center = ckpt_best.get("center", np.zeros(3, dtype=np.float32))
+    scale = float(ckpt_best.get("scale", 1.0))
+    num_classes = int(ckpt_best.get("num_classes", 3))
+
+    print(f"Center: {center}, Scale: {scale}, Num classes: {num_classes}")
+
+    # Normalize points
     xyz_norm = (xyz - center) / max(scale, 1e-8)
-    preds = np.zeros((xyz.shape[0],), dtype=np.int64)
 
     # Create test dataset and dataloader
     test_dataset = TestDataset(xyz_norm, args.chunk_size)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    with torch.no_grad():
-        for batch_xyz, batch_starts, batch_ends in test_loader:
-            batch_xyz = batch_xyz.to(device)
-            batch_logits = model(batch_xyz)
-            batch_preds = torch.argmax(batch_logits, dim=1).cpu().numpy()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            for i in range(len(batch_starts)):
-                start = batch_starts[i].item()
-                end = batch_ends[i].item()
-                chunk_pred = batch_preds[i][:end - start]
-                preds[start:end] = chunk_pred
+    # Load and evaluate best model
+    print("\n" + "="*50)
+    print("EVALUATING BEST MODEL")
+    print("="*50)
 
-    pred_tensor = torch.from_numpy(preds.astype(np.int64))
+    model_best = RandLANet(num_classes=num_classes)
+    model_best.load_state_dict(ckpt_best["model_state_dict"], strict=False)
+    model_best.to(device)
+    model_best.eval()
+
+    preds_best = run_inference(model_best, test_loader, device, xyz)
+    pred_tensor_best = torch.from_numpy(preds_best.astype(np.int64))
     label_tensor = torch.from_numpy(labels.astype(np.int64))
-    cm_total = confusion_multiclass(pred_tensor, label_tensor, num_classes)
-    metrics = multiclass_metrics(cm_total)
+    cm_best = confusion_multiclass(pred_tensor_best, label_tensor, num_classes)
+    metrics_best = multiclass_metrics(cm_best)
 
-    print("\n========== TEST RESULTS ==========")
-    print(f"Total points: {len(xyz)}")
-    print(f"Accuracy: {metrics['accuracy']:.4f}")
-    print(f"Mean IoU: {metrics['iou']:.4f}")
-    print(f"Mean F1: {metrics['mean_f1']:.4f}")
-    print(f"\nPer-Class Metrics:")
-    for idx in range(num_classes):
-        print(f"  Class {idx}:")
-        print(f"    IoU:       {metrics['iou_per_class'][idx]:.4f}")
-        print(f"    F1:        {metrics['f1_per_class'][idx]:.4f}")
-        print(f"    Precision: {metrics['precision_per_class'][idx]:.4f}")
-        print(f"    Recall:    {metrics['recall_per_class'][idx]:.4f}")
-        print(f"    TP: {int(metrics['tp'][idx])}, FP: {int(metrics['fp'][idx])}, FN: {int(metrics['fn'][idx])}")
-    
-    # Generate plots and other statistical parameters
-    print("\nGenerating visualization plots...")
-    plot_confusion_matrix(cm_total, num_classes, output_path="test_results/confusion_matrix.png")
-    plot_per_class_metrics(metrics, num_classes, output_path="test_results/per_class_metrics.png")
-    plot_error_analysis(metrics, num_classes, output_path="test_results/error_analysis.png")
+    print(f"Best Model - Total points: {len(xyz)}")
+    print(f"Best Model - Accuracy: {metrics_best['accuracy']:.4f}")
+    print(f"Best Model - Mean IoU: {metrics_best['iou']:.4f}")
+    print(f"Best Model - Mean F1: {metrics_best['mean_f1']:.4f}")
 
-    print(f"\nWriting predictions to: {args.output_las}")
-    class_filter = 1 if args.save_powerlines_only else None
-    save_predictions(las, preds, args.output_las, class_filter)
+    # Load and evaluate last model
+    print("\n" + "="*50)
+    print("EVALUATING LAST MODEL")
+    print("="*50)
+
+    model_last = RandLANet(num_classes=num_classes)
+    model_last.load_state_dict(ckpt_last["model_state_dict"], strict=False)
+    model_last.to(device)
+    model_last.eval()
+
+    preds_last = run_inference(model_last, test_loader, device, xyz)
+    pred_tensor_last = torch.from_numpy(preds_last.astype(np.int64))
+    cm_last = confusion_multiclass(pred_tensor_last, label_tensor, num_classes)
+    metrics_last = multiclass_metrics(cm_last)
+
+    print(f"Last Model - Total points: {len(xyz)}")
+    print(f"Last Model - Accuracy: {metrics_last['accuracy']:.4f}")
+    print(f"Last Model - Mean IoU: {metrics_last['iou']:.4f}")
+    print(f"Last Model - Mean F1: {metrics_last['mean_f1']:.4f}")
+
+    # Create output directory
+    output_dir = "model_comparison_results"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate plots
+    print("\n" + "="*50)
+    print("GENERATING COMPARISON PLOTS")
+    print("="*50)
+
+    # Confusion matrices
+    plot_confusion_matrix(cm_best, num_classes, "Best Model",
+                         output_path=f"{output_dir}/confusion_matrix_best.png")
+    plot_confusion_matrix(cm_last, num_classes, "Last Model",
+                         output_path=f"{output_dir}/confusion_matrix_last.png")
+
+    # Per-class metrics
+    plot_per_class_metrics(metrics_best, num_classes, "Best Model",
+                          output_path=f"{output_dir}/per_class_metrics_best.png")
+    plot_per_class_metrics(metrics_last, num_classes, "Last Model",
+                          output_path=f"{output_dir}/per_class_metrics_last.png")
+
+    # Comparison plots
+    plot_model_comparison(metrics_best, metrics_last, num_classes,
+                         output_path=f"{output_dir}/model_comparison.png")
+    plot_overall_metrics_comparison(metrics_best, metrics_last,
+                                   output_path=f"{output_dir}/overall_metrics_comparison.png")
+
+    print(f"\nAll plots saved to: {output_dir}/")
+    print("Generated files:")
+    print("- confusion_matrix_best.png")
+    print("- confusion_matrix_last.png")
+    print("- per_class_metrics_best.png")
+    print("- per_class_metrics_last.png")
+    print("- model_comparison.png")
+    print("- overall_metrics_comparison.png")
 
 
 if __name__ == "__main__":
