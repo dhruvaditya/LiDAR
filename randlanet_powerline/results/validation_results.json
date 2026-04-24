@@ -1,0 +1,28 @@
+{
+  "validation_file": "C:\\Users\\User\\Desktop\\Aditya\\randlanet_powerline\\data\\data_split\\val_binary.las",
+  "checkpoint": "C:\\Users\\User\\Desktop\\Aditya\\randlanet_powerline\\checkpoints\\binary_best.pt",
+  "total_samples": 409600,
+  "metrics": {
+    "accuracy": 0.9791064453125,
+    "precision": 0.16666666666666666,
+    "recall": 0.0008206330597889801,
+    "f1": 0.0016332244517032197,
+    "iou_class_0": 0.9791060882388126,
+    "iou_class_1": 0.0008172796263864566,
+    "miou": 0.48996168393259953,
+    "tp": 7,
+    "fp": 35,
+    "tn": 401035,
+    "fn": 8523
+  },
+  "class_distribution": {
+    "predictions": {
+      "0": 409558,
+      "1": 42
+    },
+    "targets": {
+      "0": 1,
+      "401070": 8530
+    }
+  }
+}
