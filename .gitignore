@@ -1,0 +1,51 @@
+# Ignore dataset directories and split data files
+Dataset/
+randlanet_powerline/data/data_split/
+randlanet_powerline/data/*.las
+
+# Ignore cloned repository
+RandLA-Net/
+
+# Python virtual environment
+lidar/
+venv/
+.venv/
+env/
+
+# Python cache files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch / training artifacts
+checkpoints/
+*.pt
+*.pth
+
+# IDE/editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test and notebook outputs
+*.log
+*.tmp
+*.temp
+*.png
+*.pdf
+
+# Misc
+*.egg-info/
+.eggs/
+build/
+dist/
+coverage.xml
+htmlcov/
+pytest_cache/
+MNNIT_Team/

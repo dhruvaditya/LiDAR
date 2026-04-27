@@ -1,11 +1,16 @@
 ﻿import argparse
 import os
+import sys
 
 import laspy
 import numpy as np
 import torch
 
-from randlanet_powerline.models.randlanet import RandLANet
+try:
+    from randlanet_powerline.models.randlanet import RandLANet
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from randlanet_powerline.models.randlanet import RandLANet
 
 
 def chunk_indices(total: int, chunk_size: int):
@@ -21,11 +26,12 @@ def main():
     parser.add_argument("--chunk_size", type=int, default=8192)
     args = parser.parse_args()
 
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     center = ckpt.get("center", np.zeros(3, dtype=np.float32))
     scale = float(ckpt.get("scale", 1.0))
+    num_classes = int(ckpt.get("num_classes", 3))
 
-    model = RandLANet(num_classes=2)
+    model = RandLANet(num_classes=num_classes)
     model.load_state_dict(ckpt["model_state_dict"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

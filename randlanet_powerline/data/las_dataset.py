@@ -8,7 +8,8 @@ import torch
 from torch.utils.data import Dataset
 
 
-DEFAULT_POSITIVE_PATTERNS = ["electrical_pole", "line"]
+POWERLINE_PATTERNS = ["line", "power"]
+PYLON_PATTERNS = ["pylon", "pole", "electrical_pole", "tower"]
 
 
 def discover_las_files(dataset_dir: str) -> List[str]:
@@ -19,41 +20,79 @@ def discover_las_files(dataset_dir: str) -> List[str]:
     return files
 
 
-def is_positive_file(path: str, positive_patterns: Sequence[str]) -> bool:
+def get_file_class(path: str, powerline_patterns: Sequence[str] = None, pylon_patterns: Sequence[str] = None) -> int:
+    """Classify LAS file into class 0 (background), 1 (power line), or 2 (pylon)."""
+    powerline_patterns = powerline_patterns or POWERLINE_PATTERNS
+    pylon_patterns = pylon_patterns or PYLON_PATTERNS
+    
     name = os.path.basename(path).lower()
-    return any(pattern.lower() in name for pattern in positive_patterns)
+    
+    # Check for pylon/pole first (class 2)
+    if any(pattern.lower() in name for pattern in pylon_patterns):
+        return 2
+    # Then check for power line (class 1)
+    elif any(pattern.lower() in name for pattern in powerline_patterns):
+        return 1
+    # Otherwise background (class 0)
+    else:
+        return 0
 
 
-def _read_xyz(path: str) -> np.ndarray:
+def _read_xyz_and_labels(path: str) -> Tuple[np.ndarray, np.ndarray]:
     las = laspy.read(path)
     xyz = np.vstack((las.x, las.y, las.z)).T.astype(np.float32)
+    labels = np.array(las.classification).astype(np.int64)
     if xyz.shape[0] == 0:
         raise ValueError(f"No points found in LAS file: {path}")
-    return xyz
+    return xyz, labels
 
 
 def load_points_and_labels(
     dataset_dir: str,
-    positive_patterns: Optional[Sequence[str]] = None,
+    file_names: Optional[List[str]] = None,
     max_points_per_file: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    patterns = positive_patterns or DEFAULT_POSITIVE_PATTERNS
+    """
+    Load points and labels from LAS files.
+    
+    Args:
+        dataset_dir: Directory containing LAS files
+        file_names: List of specific file names to load (e.g., ['train_randla_net.las'])
+                   If None, loads all .las files
+        max_points_per_file: Maximum points to load per file (random sampling if exceeded)
+    
+    Returns:
+        points: Combined point cloud (N, 3)
+        labels: Combined labels (N,)
+    """
+    if file_names is None:
+        # Load all LAS files
+        files = discover_las_files(dataset_dir)
+    else:
+        # Load specific files
+        files = [os.path.join(dataset_dir, fname) for fname in file_names]
+        # Check that files exist
+        for f in files:
+            if not os.path.exists(f):
+                raise FileNotFoundError(f"LAS file not found: {f}")
+    
     point_chunks = []
     label_chunks = []
-
-    for path in discover_las_files(dataset_dir):
-        xyz = _read_xyz(path)
-
+    
+    for path in files:
+        xyz, labels = _read_xyz_and_labels(path)
+        
         if max_points_per_file is not None and xyz.shape[0] > max_points_per_file:
             idx = np.random.choice(xyz.shape[0], max_points_per_file, replace=False)
             xyz = xyz[idx]
-
-        label = 1 if is_positive_file(path, patterns) else 0
-        labels = np.full((xyz.shape[0],), label, dtype=np.int64)
-
+            labels = labels[idx]
+        
         point_chunks.append(xyz)
         label_chunks.append(labels)
-
+    
+    if not point_chunks:
+        raise ValueError(f"No data loaded from {dataset_dir}")
+    
     points = np.concatenate(point_chunks, axis=0)
     labels = np.concatenate(label_chunks, axis=0)
     return points, labels
@@ -87,6 +126,7 @@ def train_val_split(
 
 
 class RandomPointBlockDataset(Dataset):
+    """Random sampling dataset - samples random points from the point cloud."""
     def __init__(
         self,
         points: np.ndarray,
@@ -122,22 +162,132 @@ class RandomPointBlockDataset(Dataset):
 
     @staticmethod
     def _augment_xyz(xyz: np.ndarray) -> np.ndarray:
+        # Rotation (preserves linear structures)
         theta = np.random.uniform(0, 2 * np.pi)
         c, s = np.cos(theta), np.sin(theta)
         rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
         xyz = xyz @ rot.T
 
-        jitter = np.random.normal(0, 0.005, size=xyz.shape).astype(np.float32)
+        # Small jitter (realistic noise)
+        jitter = np.random.normal(0, 0.002, size=xyz.shape).astype(np.float32)
         xyz = xyz + jitter
 
-        scale = np.random.uniform(0.95, 1.05)
+        # Scale variation (power lines can appear at different distances)
+        scale = np.random.uniform(0.9, 1.1)
         xyz = xyz * scale
+
+        # Elastic deformation (simulates wind/sag effects on power lines)
+        if np.random.rand() < 0.3:  # 30% chance
+            # Apply small elastic deformation along the longest axis
+            ranges = np.ptp(xyz, axis=0)  # peak-to-peak range
+            longest_axis = np.argmax(ranges)
+
+            # Create displacement field
+            displacement = np.random.normal(0, 0.01, size=xyz.shape[0])
+            xyz[:, longest_axis] += displacement
 
         return xyz.astype(np.float32)
 
 
-def compute_class_weights(labels: np.ndarray, epsilon: float = 1e-6) -> np.ndarray:
-    counts = np.bincount(labels, minlength=2).astype(np.float32)
+class SpatiallyRegularDataset(Dataset):
+    def __init__(
+        self,
+        points: np.ndarray,
+        labels: np.ndarray,
+        num_points: int,
+        steps_per_epoch: int,
+        augment: bool = False,
+        noise_init: float = 3.5,
+    ) -> None:
+        if points.shape[0] != labels.shape[0]:
+            raise ValueError("points and labels must have same length")
+        self.points = points.astype(np.float32)
+        self.labels = labels.astype(np.int64)
+        self.num_points = int(num_points)
+        self.steps_per_epoch = int(steps_per_epoch)
+        self.augment = augment
+        self.noise_init = noise_init
+
+        # Initialize possibility scores (lower = more likely to be sampled)
+        self.possibility = np.random.rand(self.points.shape[0]) * 1e-3
+        self.min_possibility = float(np.min(self.possibility))
+
+    def __len__(self) -> int:
+        return self.steps_per_epoch
+
+    def __getitem__(self, index: int):
+        _ = index
+
+        # Choose point with minimum possibility (least sampled)
+        point_ind = np.argmin(self.possibility)
+
+        # Center point of input region
+        center_point = self.points[point_ind:point_ind+1]
+
+        # Add noise to center point
+        noise = np.random.normal(scale=self.noise_init / 10, size=center_point.shape)
+        pick_point = center_point + noise.astype(center_point.dtype)
+
+        # Query nearest neighbors
+        if len(self.points) < self.num_points:
+            # If we have fewer points than needed, take all
+            queried_idx = np.arange(len(self.points))
+        else:
+            # Compute distances to pick_point
+            dists = np.sum(np.square(self.points - pick_point), axis=1)
+            # Get indices of closest points
+            queried_idx = np.argsort(dists)[:self.num_points]
+
+        # Shuffle indices
+        np.random.shuffle(queried_idx)
+
+        # Get points and labels
+        xyz = self.points[queried_idx].copy() - pick_point
+        y = self.labels[queried_idx].copy()
+
+        # Update possibility scores
+        dists = np.sum(np.square((self.points[queried_idx] - pick_point).astype(np.float32)), axis=1)
+        delta = np.square(1 - dists / np.max(dists + 1e-6))
+        self.possibility[queried_idx] += delta
+        self.min_possibility = float(np.min(self.possibility))
+
+        if self.augment:
+            xyz = self._augment_xyz(xyz)
+
+        return torch.from_numpy(xyz), torch.from_numpy(y)
+
+    @staticmethod
+    def _augment_xyz(xyz: np.ndarray) -> np.ndarray:
+        # Rotation (preserves linear structures)
+        theta = np.random.uniform(0, 2 * np.pi)
+        c, s = np.cos(theta), np.sin(theta)
+        rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+        xyz = xyz @ rot.T
+
+        # Small jitter (realistic noise)
+        jitter = np.random.normal(0, 0.002, size=xyz.shape).astype(np.float32)
+        xyz = xyz + jitter
+
+        # Scale variation (power lines can appear at different distances)
+        scale = np.random.uniform(0.9, 1.1)
+        xyz = xyz * scale
+
+        # Elastic deformation (simulates wind/sag effects on power lines)
+        if np.random.rand() < 0.3:  # 30% chance
+            # Apply small elastic deformation along the longest axis
+            ranges = np.ptp(xyz, axis=0)  # peak-to-peak range
+            longest_axis = np.argmax(ranges)
+
+            # Create displacement field
+            displacement = np.random.normal(0, 0.01, size=xyz.shape[0])
+            xyz[:, longest_axis] += displacement
+
+        return xyz.astype(np.float32)
+
+
+def compute_class_weights(labels: np.ndarray, num_classes: int = 3, epsilon: float = 1e-6) -> np.ndarray:
+    """Compute class weights for imbalanced dataset (3 classes by default)."""
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
     inv = 1.0 / (counts + epsilon)
-    weights = inv / inv.sum() * 2.0
+    weights = inv / inv.sum() * num_classes
     return weights.astype(np.float32)

@@ -1,0 +1,5 @@
+Upto now
+train_labeled_randlanet.las this one is better with a good detection of both classes:
+Class 0 (background): 43.25%
+Class 1 (power line): 29.96%
+Class 2 (pole):       26.79%
